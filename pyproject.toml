@@ -1,0 +1,33 @@
+[project]
+name = "ajev-infer"
+version = "0.5.0"
+description = "Inference for AJev, a Jev-style typed decision model (Gemma 4 12B + LoRA): calibrated probabilities for yes/no, choice and score questions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "torch>=2.4",
+    "transformers>=5.17,<6",
+    "peft>=0.13",
+    "huggingface_hub>=0.34",
+]
+
+[project.urls]
+Homepage = "https://github.com/cmzy/ajev-infer"
+Model = "https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora5"
+
+[project.optional-dependencies]
+# NVIDIA GPU serving: continuous batching, prefix caching, LoRA loaded directly
+vllm = ["vllm>=0.30", "fastapi>=0.110", "uvicorn>=0.29"]
+# Decision Index reproduction kit (github.com/apolinario/decision-index)
+leaderboard = ["decision-index @ git+https://github.com/apolinario/decision-index"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ajev"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
