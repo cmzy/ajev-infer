@@ -8,8 +8,15 @@
 - 单选（`choice`，最多 255 个选项）；
 - 按顺序排列的等级（`score`）。
 
-模型给每个选项输出**校准过的概率**。模型由 `google/gemma-4-12B-it` 和一个 LoRA 适配器组成，适配器在
-[andyzhang232/ajev-gemma4-12b-lora5](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora5)。成绩和训练细节见模型卡。
+模型给每个选项输出**校准过的概率**。每个模型都由一个 Gemma 4 底座和一个 LoRA 适配器组成：
+
+| 适配器 | 底座 | Decision Index 0.2.1 | bf16 显存 |
+|---|---|---:|---:|
+| [andyzhang232/ajev-gemma4-26b-a4b-lora1](https://huggingface.co/andyzhang232/ajev-gemma4-26b-a4b-lora1)（推荐） | `google/gemma-4-26B-A4B-it` | 57.42 | 约 55 GB |
+| [andyzhang232/ajev-gemma4-12b-lora7](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora7) | `google/gemma-4-12B-it` | 55.06 | 约 24 GB |
+
+成绩和训练细节见各自的模型卡。下面的例子用的是 12B 适配器；用 26B-A4B 时，把底座换成 `google/gemma-4-26B-A4B-it`
+（`LMPredictor("google/gemma-4-26B-A4B-it", adapter=...)`，或 `serve_vllm --base-model google/gemma-4-26B-A4B-it`）。
 
 这个仓库只包含推理代码，导入时的包名是 `ajev`。
 
@@ -33,7 +40,7 @@ pip install "ajev-infer[vllm] @ git+https://github.com/cmzy/ajev-infer"
 from ajev.lm.predictor import LMPredictor
 from ajev.schema import decisions_from_jev, jev_answer
 
-p = LMPredictor("google/gemma-4-12B-it", adapter="andyzhang232/ajev-gemma4-12b-lora5")
+p = LMPredictor("google/gemma-4-12B-it", adapter="andyzhang232/ajev-gemma4-12b-lora7")
 state = {"工单": "订单 #1182 被扣了两次款，发邮件也没人回。", "会员等级": "金卡"}
 questions = {
     "类别": {"type": "choice", "instructions": "这张工单属于哪类问题？",
@@ -51,7 +58,7 @@ for d, probs in zip(ds, p.predict(ds)):
 ## HTTP 服务（vLLM）
 
 ```sh
-python -m ajev.serve_vllm --adapter andyzhang232/ajev-gemma4-12b-lora5 --port 8000
+python -m ajev.serve_vllm --adapter andyzhang232/ajev-gemma4-12b-lora7 --port 8000
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' \
   -d '{"state": "包裹 10 月 2 日已出库。", "questions": {"已发货": {"type": "noul", "instructions": "包裹已经发出了。"}}}'
 ```
@@ -68,7 +75,7 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' \
 pip install "ajev-infer[leaderboard] @ git+https://github.com/cmzy/ajev-infer"
 # 进程内运行（transformers），一次一个请求，排行榜测延迟用的就是这种方式
 python -m decision_index run --engine ajev.jdi_engine:AJevEngine \
-    --option adapter=andyzhang232/ajev-gemma4-12b-lora5 --out runs/ajev
+    --option adapter=andyzhang232/ajev-gemma4-12b-lora7 --out runs/ajev
 # 或者连上面的 vLLM 服务
 python -m decision_index run --engine http --option base_url=http://127.0.0.1:8000 --option model=ajev --out runs/ajev
 python -m decision_index score --results runs/ajev/results.jsonl

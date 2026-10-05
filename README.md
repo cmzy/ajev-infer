@@ -4,11 +4,16 @@
 
 Inference code for **AJev**, a Jev-style *typed decision model*: give it a `state` (any text or JSON) and typed
 questions — yes/no (`noul`), single choice (`choice`, up to 255 options) or ordered levels (`score`) — and it returns a
-calibrated probability for every option. The model is `google/gemma-4-12B-it` plus a LoRA adapter
-([andyzhang232/ajev-gemma4-12b-lora5](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora5)).
+calibrated probability for every option. Each model is a Gemma 4 base plus a LoRA adapter:
 
-This is the inference code only; the import name is `ajev`. Results and training details are in the
-[model card](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora5).
+| Adapter | Base | Decision Index 0.2.1 | bf16 memory |
+|---|---|---:|---:|
+| [andyzhang232/ajev-gemma4-26b-a4b-lora1](https://huggingface.co/andyzhang232/ajev-gemma4-26b-a4b-lora1) (recommended) | `google/gemma-4-26B-A4B-it` | 57.42 | ~55 GB |
+| [andyzhang232/ajev-gemma4-12b-lora7](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora7) | `google/gemma-4-12B-it` | 55.06 | ~24 GB |
+
+This is the inference code only; the import name is `ajev`. Results and training details are in the model cards.
+The examples below use the 12B adapter; for the 26B-A4B one, pass `google/gemma-4-26B-A4B-it` as the base model
+(`LMPredictor("google/gemma-4-26B-A4B-it", adapter=...)`, or `serve_vllm --base-model google/gemma-4-26B-A4B-it`).
 
 ## Install
 
@@ -28,7 +33,7 @@ Use transformers 5.17 or newer: older versions tokenize Gemma 4 differently from
 from ajev.lm.predictor import LMPredictor
 from ajev.schema import decisions_from_jev, jev_answer
 
-p = LMPredictor("google/gemma-4-12B-it", adapter="andyzhang232/ajev-gemma4-12b-lora5")
+p = LMPredictor("google/gemma-4-12B-it", adapter="andyzhang232/ajev-gemma4-12b-lora7")
 state = {"ticket": "I was charged twice for order #1182 and nobody answers my emails.", "tier": "gold"}
 questions = {
     "topic":  {"type": "choice", "instructions": "What is the ticket about?",
@@ -49,7 +54,7 @@ request has several questions). Calibration temperatures are read from the adapt
 ## HTTP server (vLLM)
 
 ```sh
-python -m ajev.serve_vllm --adapter andyzhang232/ajev-gemma4-12b-lora5 --port 8000
+python -m ajev.serve_vllm --adapter andyzhang232/ajev-gemma4-12b-lora7 --port 8000
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' \
   -d '{"state": "The parcel left the warehouse on 2 Oct.", "questions": {"shipped": {"type": "noul", "instructions": "Has the parcel shipped?"}}}'
 ```
@@ -67,7 +72,7 @@ With the [reproduction kit](https://github.com/apolinario/decision-index) instal
 pip install "ajev-infer[leaderboard] @ git+https://github.com/cmzy/ajev-infer"
 # in-process (transformers), one request at a time — the setting the board uses for latency
 python -m decision_index run --engine ajev.jdi_engine:AJevEngine \
-    --option adapter=andyzhang232/ajev-gemma4-12b-lora5 --out runs/ajev
+    --option adapter=andyzhang232/ajev-gemma4-12b-lora7 --out runs/ajev
 # or against the vLLM server above
 python -m decision_index run --engine http --option base_url=http://127.0.0.1:8000 --option model=ajev --out runs/ajev
 python -m decision_index score --results runs/ajev/results.jsonl
