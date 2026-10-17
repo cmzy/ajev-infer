@@ -17,7 +17,9 @@ import os
 import torch
 
 from ajev.lm.labels import option_labels
-from ajev.lm.prompt import MAX_LETTER_OPTIONS, build_user_message
+from ajev.lm.prompt import MAX_LETTER_OPTIONS, PROMPT_VERSIONS, chat_messages, uses_v2_layout
+from ajev.lm.thinking import (ThinkingConfig, ThoughtInfo, chat_ids, close_token_id, end_token_ids, is_unsure,
+                              parse_mode, readout_ids, thought_room, thought_text)
 from ajev.schema import Decision
 
 # Adapter-side config: base model, training state limit, step, calibration temperatures.
@@ -59,18 +61,17 @@ def letter_token_table(tok) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.tensor(ids), torch.tensor(valid)
 
 
-def prompt_ids(tok, d: Decision, max_state_tokens: int) -> list[int]:
-    """Token ids for one decision, ending at the answer position. Longer states are truncated."""
+def prompt_ids(tok, d: Decision, max_state_tokens: int, thinking: bool = False, version: str = "v1") -> list[int]:
+    """Token ids for one decision in prompt ``version`` (see ajev/lm/prompt.py). Longer states are truncated.
+
+    thinking=False ends at the answer position (an empty, closed thought); thinking=True ends where the
+    model starts its thought (see ajev/lm/thinking.py).
+    """
     state_ids = tok.encode(d.state, add_special_tokens=False)
     state = d.state if len(state_ids) <= max_state_tokens else \
         tok.decode(state_ids[:max_state_tokens]) + " …[truncated]"
     labels = option_labels(tok)[0] if len(d.options) > MAX_LETTER_OPTIONS else None
-    messages = [{"role": "user", "content": build_user_message(d, state, labels)}]
-    ids = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
-    # Some transformers versions return a dict.
-    if not isinstance(ids, list):
-        ids = ids["input_ids"]
-    return list(ids)
+    return chat_ids(tok, chat_messages(d, state, labels, version, thinking), thinking)
 
 
 def left_pad(seqs: list[list[int]], pad_id: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -128,6 +129,14 @@ def read_lm_config(adapter: str | None) -> dict:
         return json.load(f)
 
 
+def resolve_prompt_version(cfg: dict, override: str | None = None) -> str:
+    """An explicit version wins; otherwise the adapter's; adapters from before versioning (and no adapter) use v1."""
+    version = override or cfg.get("prompt_version", "v1")
+    if version not in PROMPT_VERSIONS:
+        raise ValueError(f"unknown prompt version {version!r}; known: {PROMPT_VERSIONS}")
+    return version
+
+
 class LMPredictor:
     """Zero-shot or LoRA predictor.
 
@@ -137,14 +146,18 @@ class LMPredictor:
         temperatures: per-type temperatures; None reads them from the adapter, {} disables them.
         merge: merge the LoRA in memory (faster). Do not save and reload a merged Gemma 4 checkpoint.
         prefix_cache: score questions that share a state on one cached prefix.
+        thinking: thought budget and auto threshold; None reads them from the adapter (see ajev/lm/thinking.py).
+        prompt_version: prompt format; None reads it from the adapter (v1 when the adapter has none).
     """
 
     def __init__(self, model_id: str, adapter: str | None = None, device: str | None = None,
                  batch_tokens: int = 24000, max_state_tokens: int | None = None,
                  dtype: torch.dtype = torch.bfloat16, temperatures: dict[str, float] | None = None,
-                 model=None, tok=None, merge: bool = False, prefix_cache: bool = False) -> None:
+                 model=None, tok=None, merge: bool = False, prefix_cache: bool = False,
+                 thinking: ThinkingConfig | None = None, prompt_version: str | None = None) -> None:
         adapter = resolve_adapter(adapter)
         cfg = read_lm_config(adapter)
+        self.prompt_version = resolve_prompt_version(cfg, prompt_version)
         self.tok = tok or load_tokenizer(model_id)
         self.device = torch.device(device or default_device())
         if model is None:
@@ -168,6 +181,15 @@ class LMPredictor:
         self.prefix_cache = prefix_cache
         self.min_shared_prefix = 64
         self.prefix_cache_bytes = 16 * 2 ** 30  # memory budget for copies of the prefix cache
+        self.thinking = thinking or ThinkingConfig.from_lm_config(cfg)
+        text_cfg = getattr(self.model.config, "text_config", None) or self.model.config
+        self.context_limit = getattr(text_cfg, "max_position_embeddings", None) or 131072
+        self.end_ids = end_token_ids(self.tok)
+        try:
+            self.close_id: int | None = close_token_id(self.tok)
+        except ValueError:
+            self.close_id = None  # no thinking format for this base model
+        self.last_thoughts: list[ThoughtInfo] = []
 
     @torch.no_grad()
     def predict_logits(self, decisions: list[Decision]) -> list[list[float]]:
@@ -211,7 +233,8 @@ class LMPredictor:
         was_training = self.model.training
         self.model.eval()
         out: list[list[float]] = [[0.0] * len(d.options) for d in decisions]
-        todo = [(i, prompt_ids(self.tok, d, self.max_state_tokens)) for i, d in enumerate(decisions)]
+        todo = [(i, prompt_ids(self.tok, d, self.max_state_tokens, version=self.prompt_version))
+                for i, d in enumerate(decisions)]
         if self.prefix_cache:
             todo = self._shared_prefix_scores(decisions, todo, out)
         # Sort by length to minimise padding.
@@ -245,9 +268,12 @@ class LMPredictor:
         The prefix is the longest common prefix of the full prompt token ids (not of the state alone, which
         can tokenize differently at the boundary). Tails are right-padded and run on copies of the cache.
         """
-        groups: dict[str, list[tuple[int, list[int]]]] = {}
+        # 按（材料, 版式）分组：提示词 v2 / v3 下，不超过 26 个选项的单选题以系统消息开头，其余题仍是 v1 版式，
+        # 两种版式的共同前缀只有几个 token；混在一组会让整组都用不上前缀缓存。
+        groups: dict[tuple[str, bool], list[tuple[int, list[int]]]] = {}
         for item in todo:
-            groups.setdefault(decisions[item[0]].state, []).append(item)
+            d = decisions[item[0]]
+            groups.setdefault((d.state, self.prompt_version != "v1" and uses_v2_layout(d)), []).append(item)
         rest = []
         for items in groups.values():
             p = common_prefix_len([s for _, s in items]) if len(items) > 1 else 0
@@ -297,10 +323,61 @@ class LMPredictor:
                 out[i] = scores[r, : len(decisions[i].options)].tolist()
             del c, logits
 
-    def predict(self, decisions: list[Decision]) -> list[list[float]]:
-        """Option probabilities: softmax(logits / temperature of the question type)."""
+    def predict(self, decisions: list[Decision], thinking: str | None = None) -> list[list[float]]:
+        """Option probabilities: softmax(logits / temperature of the question type).
+
+        thinking: "off" (default), "on" or "auto" (see ajev/lm/thinking.py); what thinking did per decision is
+        left in ``last_thoughts``.
+        """
+        mode = parse_mode(thinking)
+        if mode != "off" and self.close_id is None:
+            raise ValueError("thinking is not supported by this base model")
+        self.last_thoughts = [ThoughtInfo() for _ in decisions]
+        if mode == "off":
+            return self._direct(decisions)
+        probs: list[list[float] | None] = self._direct(decisions) if mode == "auto" else [None] * len(decisions)
+        for i, d in enumerate(decisions):
+            if mode == "on" or is_unsure(probs[i], self.thinking.auto_threshold):
+                done = self._think(d)
+                if done is not None:
+                    probs[i], self.last_thoughts[i] = done
+        missing = [i for i, p in enumerate(probs) if p is None]  # "on" without room for a thought
+        for i, p in zip(missing, self._direct([decisions[i] for i in missing])):
+            probs[i] = p
+        return probs
+
+    def _direct(self, decisions: list[Decision]) -> list[list[float]]:
         probs = []
         for d, lg in zip(decisions, self.predict_logits(decisions)):
             t = torch.tensor(lg) / self.temperatures.get(d.type, 1.0)
             probs.append(torch.softmax(t, dim=-1).tolist())
         return probs
+
+    @torch.no_grad()
+    def _think(self, d: Decision) -> tuple[list[float], ThoughtInfo] | None:
+        """Greedy thought up to the budget, then the label logits after the closed thought.
+        None when the question is answered directly instead (no room for a thought, or more options than labels)."""
+        if len(d.options) > len(option_labels(self.tok)[0]):
+            return None
+        ids = prompt_ids(self.tok, d, self.max_state_tokens, thinking=True, version=self.prompt_version)
+        room = thought_room(len(ids), self.thinking.budget, self.context_limit)
+        if room == 0:
+            return None
+        was_training = self.model.training
+        self.model.eval()
+        inp = torch.tensor([ids], device=self.device)
+        pad = self.tok.pad_token_id if self.tok.pad_token_id is not None else 0
+        out = self.model.generate(input_ids=inp, attention_mask=torch.ones_like(inp), max_new_tokens=room,
+                                  do_sample=False, eos_token_id=[self.close_id, *sorted(self.end_ids - {pad})],
+                                  pad_token_id=pad)
+        thought = out[0, len(ids):].tolist()
+        ro, forced = readout_ids(ids, thought, self.close_id, self.end_ids)
+        x, mask = left_pad([ro], pad)
+        lg = letter_logits(self.model, x.to(self.device), mask.to(self.device), self.table, self.valid,
+                           len(d.options))[0]
+        if was_training:
+            self.model.train()
+        t = self.thinking.temperature(d.type, self.temperatures)
+        info = ThoughtInfo(used=True, tokens=len(thought), forced_close=forced,
+                           text=thought_text(self.tok, thought, self.close_id))
+        return torch.softmax(lg.cpu() / t, dim=-1).tolist(), info

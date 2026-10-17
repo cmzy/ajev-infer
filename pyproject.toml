@@ -1,6 +1,6 @@
 [project]
 name = "ajev-infer"
-version = "0.6.0"
+version = "0.7.0"
 description = "Inference for AJev, a Jev-style typed decision model (Gemma 4 + LoRA): calibrated probabilities for yes/no, choice and score questions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/cmzy/ajev-infer"
-Model = "https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora5"
+Model = "https://huggingface.co/andyzhang232/ajev-gemma4-31b-lm6q"
 
 [project.optional-dependencies]
 # NVIDIA GPU serving: continuous batching, prefix caching, LoRA loaded directly

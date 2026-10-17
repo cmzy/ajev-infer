@@ -18,7 +18,8 @@ def option_labels(tok) -> tuple[list[str], list[list[int]], list[list[bool]]]:
     key = id(tok)
     if key in _LABEL_CACHE:
         return _LABEL_CACHE[key]
-    ctx = tok.apply_chat_template([{"role": "user", "content": "x"}], add_generation_prompt=True, tokenize=False)
+    ctx = tok.apply_chat_template([{"role": "user", "content": "x"}], add_generation_prompt=True, tokenize=False,
+                                  enable_thinking=False)
     ctx_ids = tok.encode(ctx, add_special_tokens=False)
 
     def forms_of(label: str) -> list[int]:

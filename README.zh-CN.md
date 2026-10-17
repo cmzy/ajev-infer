@@ -10,13 +10,15 @@
 
 模型给每个选项输出**校准过的概率**。每个模型都由一个 Gemma 4 底座和一个 LoRA 适配器组成：
 
-| 适配器 | 底座 | Decision Index 0.2.1 | bf16 显存 |
+| 适配器 | 底座 | Decision Index | bf16 显存 |
 |---|---|---:|---:|
-| [andyzhang232/ajev-gemma4-26b-a4b-lora1](https://huggingface.co/andyzhang232/ajev-gemma4-26b-a4b-lora1)（推荐） | `google/gemma-4-26B-A4B-it` | 57.42 | 约 55 GB |
-| [andyzhang232/ajev-gemma4-12b-lora7](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora7) | `google/gemma-4-12B-it` | 55.06 | 约 24 GB |
+| [andyzhang232/ajev-gemma4-31b-lm6q](https://huggingface.co/andyzhang232/ajev-gemma4-31b-lm6q)（推荐） | `google/gemma-4-31B-it` | 65.08（公开 0.3） | 约 62 GB |
+| [andyzhang232/ajev-gemma4-26b-a4b-lora1](https://huggingface.co/andyzhang232/ajev-gemma4-26b-a4b-lora1) | `google/gemma-4-26B-A4B-it` | 57.42（0.2.1） | 约 55 GB |
+| [andyzhang232/ajev-gemma4-12b-lora7](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora7) | `google/gemma-4-12B-it` | 55.06（0.2.1） | 约 24 GB |
 
-成绩和训练细节见各自的模型卡。下面的例子用的是 12B 适配器；用 26B-A4B 时，把底座换成 `google/gemma-4-26B-A4B-it`
-（`LMPredictor("google/gemma-4-26B-A4B-it", adapter=...)`，或 `serve_vllm --base-model google/gemma-4-26B-A4B-it`）。
+成绩和训练细节见各自的模型卡。下面的例子用的是 12B 适配器；用其他适配器时，把底座换成对应的模型
+（`LMPredictor("google/gemma-4-31B-it", adapter=...)`，或 `serve_vllm --base-model google/gemma-4-31B-it`）。
+31B 适配器使用 `v3` 提示词（记录在它的 `ajev_lm_config.json` 里，会自动启用）。
 
 这个仓库只包含推理代码，导入时的包名是 `ajev`。
 
@@ -67,6 +69,25 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' \
 - 提示词超过 `--max-model-len`（默认 131,072 个 token）时，返回 HTTP 422，不会截断材料。
 - 适配器直接作为 LoRA 加载。不要使用“合并后保存”的模型：在 transformers 5.17 下，Gemma 4 合并后保存的模型重新加载后，结果会不一样。
 
+**思考模式。** 请求里可以加 `"thinking": "off" | "on" | "auto"`（默认 `off`，或启动服务时 `--thinking` 指定的模式）：
+
+| 模式 | 做什么 | 速度 |
+|---|---|---|
+| `off` | 直接读各选项的概率（和训练时一样） | 最快 |
+| `on` | 模型先写一段思考（贪心解码，最多 `--thinking-budget` 个 token，默认 1024；写满还没结束就强制结束），再读概率 | 每道题几秒到一分钟以上 |
+| `auto` | 先直接作答，最高概率低于 `--auto-threshold`（默认 0.6）的题再思考 | 介于两者之间 |
+
+```sh
+curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{"thinking": "auto", "include_thoughts": true,
+  "state": "...", "questions": {...}}'
+```
+
+开了思考时，每个答案多一个 `"thinking": {"used", "tokens", "forced_close"}`（`include_thoughts` 为 true 时还有
+`"text"`），`usage.output_tokens` 是思考写出的 token 数。Mac 版服务和 Playground、`LMPredictor.predict(ds, thinking=...)` /
+`VLLMPredictor.predict(ds, thinking=...)`、排行榜引擎的 `--option thinking=...` 都支持同样的选项。适配器训练时没有思考，
+校准温度也是按直接作答定的，所以思考预算和 auto 门槛要在自己的开发集上选；选好后可以写进适配器的 `ajev_lm_config.json`：
+`"thinking": {"budget", "auto_threshold", "temperatures"}`。
+
 ## Decision Index 排行榜
 
 装好[排行榜复现工具包](https://github.com/apolinario/decision-index)并构建好题库后：
@@ -82,6 +103,11 @@ python -m decision_index score --results runs/ajev/results.jsonl
 ```
 
 两种引擎都会把每个请求完整发送，不截断、不删选项，提示词也和平时使用时完全相同。
+31B 的提交用的是 `http` 引擎，连
+`python -m ajev.serve_vllm --base-model google/gemma-4-31B-it --adapter andyzhang232/ajev-gemma4-31b-lm6q --max-model-len 40960`。
+
+**倒序重答（默认关闭）。** `serve_vllm --reread unsure|all` 会把选项倒过来再问一次，两次的概率在对数空间平均
+（`unsure`：只在最高概率低于 `--reread-threshold`（默认 0.7）时重答）。所有公开的分数都没有用它。
 
 ## 打分原理
 

@@ -6,14 +6,16 @@ Inference code for **AJev**, a Jev-style *typed decision model*: give it a `stat
 questions — yes/no (`noul`), single choice (`choice`, up to 255 options) or ordered levels (`score`) — and it returns a
 calibrated probability for every option. Each model is a Gemma 4 base plus a LoRA adapter:
 
-| Adapter | Base | Decision Index 0.2.1 | bf16 memory |
+| Adapter | Base | Decision Index | bf16 memory |
 |---|---|---:|---:|
-| [andyzhang232/ajev-gemma4-26b-a4b-lora1](https://huggingface.co/andyzhang232/ajev-gemma4-26b-a4b-lora1) (recommended) | `google/gemma-4-26B-A4B-it` | 57.42 | ~55 GB |
-| [andyzhang232/ajev-gemma4-12b-lora7](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora7) | `google/gemma-4-12B-it` | 55.06 | ~24 GB |
+| [andyzhang232/ajev-gemma4-31b-lm6q](https://huggingface.co/andyzhang232/ajev-gemma4-31b-lm6q) (recommended) | `google/gemma-4-31B-it` | 65.08 (public 0.3) | ~62 GB |
+| [andyzhang232/ajev-gemma4-26b-a4b-lora1](https://huggingface.co/andyzhang232/ajev-gemma4-26b-a4b-lora1) | `google/gemma-4-26B-A4B-it` | 57.42 (0.2.1) | ~55 GB |
+| [andyzhang232/ajev-gemma4-12b-lora7](https://huggingface.co/andyzhang232/ajev-gemma4-12b-lora7) | `google/gemma-4-12B-it` | 55.06 (0.2.1) | ~24 GB |
 
 This is the inference code only; the import name is `ajev`. Results and training details are in the model cards.
-The examples below use the 12B adapter; for the 26B-A4B one, pass `google/gemma-4-26B-A4B-it` as the base model
-(`LMPredictor("google/gemma-4-26B-A4B-it", adapter=...)`, or `serve_vllm --base-model google/gemma-4-26B-A4B-it`).
+The examples below use the 12B adapter; for the others, pass their base model
+(`LMPredictor("google/gemma-4-31B-it", adapter=...)`, or `serve_vllm --base-model google/gemma-4-31B-it`).
+The 31B adapter uses prompt version `v3` (recorded in its `ajev_lm_config.json` and applied automatically).
 
 ## Install
 
@@ -64,6 +66,26 @@ than `--max-model-len` (default 131,072 tokens) are refused with HTTP 422 instea
 loaded directly as a LoRA; do not serve a saved merged checkpoint (with transformers 5.17 a merged Gemma 4 checkpoint
 reloads with different outputs).
 
+**Thinking modes.** A request may add `"thinking": "off" | "on" | "auto"` (default `off`, or the server's `--thinking`):
+
+| Mode | What happens | Speed |
+|---|---|---|
+| `off` | reads the option probabilities directly (the trained behaviour) | fastest |
+| `on` | the model first writes a thought (greedy, at most `--thinking-budget` tokens, default 1024; closed by force at the budget), then the probabilities are read after it | each question takes seconds to a minute or more |
+| `auto` | answers directly, then thinks only on questions whose top probability is below `--auto-threshold` (default 0.6) | between the two |
+
+```sh
+curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{"thinking": "auto", "include_thoughts": true,
+  "state": "...", "questions": {...}}'
+```
+
+With thinking on or auto, each answer gets `"thinking": {"used", "tokens", "forced_close"}` (plus `"text"` when
+`include_thoughts` is true), and `usage.output_tokens` counts the thought tokens. The same option exists in the Mac
+server and playground, in `LMPredictor.predict(ds, thinking=...)` / `VLLMPredictor.predict(ds, thinking=...)`, and as
+`--option thinking=...` for the Decision Index engine. The adapters were trained without thinking and the calibration
+temperatures were fitted on direct answers, so pick the budget and auto threshold on your own dev set; they can be
+stored in the adapter's `ajev_lm_config.json` under `"thinking": {"budget", "auto_threshold", "temperatures"}`.
+
 ## Decision Index (leaderboard)
 
 With the [reproduction kit](https://github.com/apolinario/decision-index) installed and its suite built:
@@ -79,6 +101,12 @@ python -m decision_index score --results runs/ajev/results.jsonl
 ```
 
 Both engines send every request whole (no truncation, no option pruning) with the same prompt as everyday use.
+The 31B submission ran the `http` engine against
+`python -m ajev.serve_vllm --base-model google/gemma-4-31B-it --adapter andyzhang232/ajev-gemma4-31b-lm6q --max-model-len 40960`.
+
+**Reread (off by default).** `serve_vllm --reread unsure|all` asks a question a second time with the options in
+reverse order and averages the two readings in log space (`unsure`: only when the top probability is below
+`--reread-threshold`, default 0.7). It was not used for any published score.
 
 ## How it scores
 

@@ -5,6 +5,8 @@
 
 Same prompt and readout as everyday use. States are never truncated: requests over the context limit,
 or that do not fit in GPU memory, are reported as unsupported. All options are scored.
+``--option thinking=off|on|auto`` (default off) selects the thinking mode (see ajev/lm/thinking.py).
+``--option prompt_version=v1|v2`` overrides the prompt format (default: the adapter's, else v1; see ajev/lm/prompt.py).
 """
 
 from __future__ import annotations
@@ -21,29 +23,38 @@ class AJevEngine(Engine):
     name = "ajev"
     latency = "Device-synchronized in-process request wall time including prompt construction; all questions of a request scored in token-budgeted batches; excludes model loading."
 
-    def __init__(self, model="google/gemma-4-12B-it", adapter=None, batch_tokens=24000, prefix_cache=True, **options):
+    def __init__(self, model="google/gemma-4-12B-it", adapter=None, batch_tokens=24000, prefix_cache=True,
+                 thinking="off", prompt_version=None, **options):
         super().__init__(**options)
         import torch
 
         from ajev.lm.predictor import LMPredictor, prompt_ids
+        from ajev.lm.thinking import parse_mode
 
         self.torch, self.prompt_ids = torch, prompt_ids
         prefix_cache = prefix_cache not in (False, "false", "False", "0", 0)
+        self.thinking = parse_mode(thinking)
         self.p = LMPredictor(model, adapter=adapter or None, batch_tokens=int(batch_tokens),
-                             max_state_tokens=NO_TRUNCATION, prefix_cache=prefix_cache)
-        cfg = self.p.model.config
-        cfg = getattr(cfg, "text_config", None) or cfg
-        self.limit = getattr(cfg, "max_position_embeddings", None) or 131072
+                             max_state_tokens=NO_TRUNCATION, prefix_cache=prefix_cache,
+                             prompt_version=prompt_version or None)
+        self.limit = self.p.context_limit  # 和 LMPredictor 的思考预算用同一个上限
+        if self.thinking != "off" and self.p.close_id is None:
+            raise ValueError("thinking is not supported by this base model")
         self.model_id = f"ajev:{adapter or model}"
         self.provenance = {
             "kind": "ajev", "base_model": model, "adapter": adapter, "context_limit_tokens": self.limit,
-            "temperatures": self.p.temperatures,
+            "temperatures": self.p.temperatures, "thinking": self.thinking, "prompt_version": self.p.prompt_version,
             "policy": "Each question is one prompt (state + question + labelled options); the next-token logits of the "
                       "option labels (A-Z, then single-token two-letter codes up to 255) are softmaxed with a per-type "
                       "calibration temperature. Questions of one request share the token-identical prompt prefix "
                       f"(instructions + state) through a KV cache computed once (prefix_cache={prefix_cache}). "
                       "No truncation: prompts over the context limit, or that do not fit in "
-                      "GPU memory, are refused as unsupported.",
+                      "GPU memory, are refused as unsupported."
+                      + ("" if self.thinking == "off" else
+                         f" Thinking={self.thinking}: a greedy thought of at most {self.p.thinking.budget} tokens "
+                         "(closed by force at the budget) precedes the label readout"
+                         + (f" for questions whose top probability is below {self.p.thinking.auto_threshold}"
+                            if self.thinking == "auto" else "") + "."),
         }
 
     def runtime(self):
@@ -62,11 +73,11 @@ class AJevEngine(Engine):
             if q["type"] not in ("choice", "noul"):
                 raise Unsupported(f"question {k}: unsupported type {q['type']}")
         ds = decisions_from_jev(state, plain_questions(questions), lang=detect_lang(state, questions))
-        lengths = [len(self.prompt_ids(self.p.tok, d, NO_TRUNCATION)) for d in ds]
+        lengths = [len(self.prompt_ids(self.p.tok, d, NO_TRUNCATION, version=self.p.prompt_version)) for d in ds]
         if max(lengths) > self.limit:
             raise Unsupported(f"prompt of {max(lengths)} tokens exceeds the {self.limit}-token context")
         try:
-            probs = self.p.predict(ds)
+            probs = self.p.predict(ds, thinking=self.thinking)
         except self.torch.cuda.OutOfMemoryError:
             self.torch.cuda.empty_cache()
             raise Unsupported(f"out of GPU memory at {max(lengths)} prompt tokens")
@@ -79,4 +90,7 @@ class AJevEngine(Engine):
             else:
                 best = max(pmap, key=pmap.get)
                 answers[qid] = {"type": "choice", "choice": best, "probabilities": pmap}
-        return {"model": self.model_id, "answers": answers, "usage": {"input_tokens": sum(lengths)}}, None
+        usage = {"input_tokens": sum(lengths)}
+        if self.thinking != "off":
+            usage["output_tokens"] = sum(t.tokens for t in self.p.last_thoughts)
+        return {"model": self.model_id, "answers": answers, "usage": usage}, None
