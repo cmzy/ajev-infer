@@ -62,14 +62,15 @@ PROMPT_VERSIONS = ("v1", "v2", "v3")
 SYSTEM_V2 = ("You are a calibration engine. You never answer in prose. You are given a state, a question and "
              "a numbered set of options, and you choose exactly one option. You reply with that option's "
              "LETTER and nothing else — a single character, no words, no punctuation, no explanation.")
-# 思考专用的系统消息（docs/plan_lm6.md 第 11 节）：v2/v3 的系统消息要求"never answer in prose"，和思考模式
-# "先写推理再作答"矛盾。思考时换成这一条，并且不重复用户消息（推理本身就是"再读一遍"）。
+# System message used only when thinking: the v2/v3 system message says "never answer in prose", which contradicts
+# "reason first, then answer". With thinking this one is used instead, and the user message is not repeated (the
+# reasoning already rereads it).
 SYSTEM_THINK = ("You are a decision engine. Think through the state and the question step by step in your thinking, "
                 "weighing the listed options against each other. When your thinking is done, your final reply is the "
                 "LETTER of exactly one option and nothing else — no words, no punctuation, no explanation.")
 _BARE_KEY = re.compile(r"^([A-Za-z]|\d{1,2}|[A-Za-z]\d)$")
-# v3 = v2 + 把用户消息重复一遍（shisa-de-2 的做法：因果模型第二遍读时能"看到"后面的内容）。
-# 太长的消息不重复，避免上下文和延迟翻倍。
+# v3 = v2 + the user message repeated once (as in shisa-de-2: on the second pass a causal model can "see" what comes
+# later). Very long messages are not repeated, so context and latency do not double.
 REPEAT_SEP = "\n\nRead the same input again before answering:\n\n"
 REPEAT_MAX_CHARS = 12000
 

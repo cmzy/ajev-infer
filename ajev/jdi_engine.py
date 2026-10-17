@@ -37,7 +37,7 @@ class AJevEngine(Engine):
         self.p = LMPredictor(model, adapter=adapter or None, batch_tokens=int(batch_tokens),
                              max_state_tokens=NO_TRUNCATION, prefix_cache=prefix_cache,
                              prompt_version=prompt_version or None)
-        self.limit = self.p.context_limit  # 和 LMPredictor 的思考预算用同一个上限
+        self.limit = self.p.context_limit  # the same limit as LMPredictor uses for the thinking budget
         if self.thinking != "off" and self.p.close_id is None:
             raise ValueError("thinking is not supported by this base model")
         self.model_id = f"ajev:{adapter or model}"

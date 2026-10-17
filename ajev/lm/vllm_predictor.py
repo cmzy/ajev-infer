@@ -59,14 +59,14 @@ class LabelReader:
         self.max_model_len = max_model_len
         cfg = read_lm_config(adapter)
         self.prompt_version = resolve_prompt_version(cfg, prompt_version)
-        # 重读取平均（ajev/lm/reread.py）：显式参数优先，否则读适配器配置里的 inference.reread，默认 off
+        # reread (ajev/lm/reread.py): an explicit argument wins, else inference.reread from the adapter config, default off
         inf = cfg.get("inference") or {}
         self.reread = parse_reread(reread or inf.get("reread"))
         self.reread_threshold = reread_threshold if reread_threshold is not None else \
             float(inf.get("reread_threshold", DEFAULT_THRESHOLD))
         self.temperatures = temperatures if temperatures is not None else cfg.get("temperatures", {})
         self.thinking = thinking or ThinkingConfig.from_lm_config(cfg)
-        # 每个适配器路径一个 id：同一个 vLLM 进程里换了适配器（例如不同的 λ），不会用到缓存里的旧权重
+        # one LoRA id per adapter path, so switching adapters in one vLLM process (e.g. another λ) never reuses cached weights
         self.lora = LoRARequest(f"ajev-{zlib.crc32(adapter.encode()):08x}", zlib.crc32(adapter.encode()) % (2 ** 31 - 1) + 1,
                                 adapter) if adapter else None
         _, ids, valid = option_labels(self.tok)
@@ -164,7 +164,7 @@ class VLLMPredictor:
         if mode in ("off", "auto"):
             probs = self._read(decisions, [r.prompt(d) for d in decisions], thought=False)
             again = [i for i, d in enumerate(decisions) if needs_reread(r.reread, d, probs[i], r.reread_threshold)]
-            if again:  # 倒序再读一次，对数平均（思考之前做，auto 模式按平均后的置信度决定要不要思考）
+            if again:  # reversed second reading, log-space mean (before thinking; auto decides on the averaged confidence)
                 rev = [reversed_decision(decisions[i]) for i in again]
                 for i, p2 in zip(again, self._read(rev, [r.prompt(d) for d in rev], thought=False)):
                     probs[i], self.last_reread[i] = combine(probs[i], p2), True
@@ -250,7 +250,7 @@ class AsyncVLLMPredictor:
         probs = list(await asyncio.gather(*(self._one(d, i) for d, i in zip(decisions, ids))))
         tokens = sum(len(i) for i in ids)
         again = [k for k, d in enumerate(decisions) if needs_reread(r.reread, d, probs[k], r.reread_threshold)]
-        if again:  # 倒序再读一次，对数平均
+        if again:  # reversed second reading, log-space mean
             rev = [reversed_decision(decisions[k]) for k in again]
             rev_ids = [r.prompt(d) for d in rev]
             p2s = await asyncio.gather(*(self._one(d, i) for d, i in zip(rev, rev_ids)))

@@ -6,19 +6,21 @@
     auto  answer directly first; questions whose top option probability is below ``auto_threshold`` are
           answered again with thinking.
 
-给初学者的说明：
-- **思考在提示词里是什么样子**：聊天模板有一个 ``enable_thinking`` 开关。关闭时（我们训练和平时推理都用这种），
-  Gemma 4 的提示词结尾是 ``<|turn>model\\n<|channel>thought\\n<channel|>``——一段已经“关上”的空思考，
-  下一个 token 就是答案字母。打开时，模板在开头加一个 ``<|think|>`` 标记，模型会自己写出
-  ``<|channel>thought\\n……<channel|>``。Qwen 系列对应的是 ``<think>……</think>``。
-- **怎么从思考得到概率**：模型写完思考（遇到“关闭标记”就停下）后，我们把“提示词 + 思考”拼起来再算一次，
-  读答案位置上各个选项字母的打分，和不思考时完全同一种读法，所以返回的仍然是每个选项的概率。
-- **预算**：思考最多写 ``budget`` 个 token。写满了还没关闭，就替模型补上关闭标记，强制它给答案——
-  这样延迟有上限，也不会出现“永远想不完”的题。
-- **贪心解码（temperature=0）**：同样的请求每次想出同样的内容，结果可以复现。
-- **auto 的门槛**：最高概率低于门槛才思考。门槛只能在自己的开发集上定，不能拿排行榜题目来调。
+Notes:
+- **What thinking looks like in the prompt**: the chat template has an ``enable_thinking`` switch. With it off (how
+  the adapters were trained and how they normally run), a Gemma 4 prompt ends with
+  ``<|turn>model\\n<|channel>thought\\n<channel|>`` -- an empty, already closed thought -- so the next token is the
+  answer label. With it on, the template adds a ``<|think|>`` marker and the model writes
+  ``<|channel>thought\\n...<channel|>`` itself. The Qwen equivalent is ``<think>...</think>``.
+- **Probabilities after thinking**: once the thought is closed, prompt + thought are scored again and the option-label
+  logits are read at the answer position, exactly as without thinking, so the result is still one probability per
+  option.
+- **Budget**: a thought is at most ``budget`` tokens. If it is still open at the budget, the closing marker is added
+  for the model and it has to answer, so latency is bounded.
+- **Greedy decoding (temperature 0)**: the same request always produces the same thought.
+- **auto threshold**: only questions whose top probability is below it get a thought. Pick it on your own dev data.
 
-本模块不依赖 torch，vLLM 和 transformers 两种推理后端共用。
+This module does not import torch; the vLLM and transformers backends share it.
 """
 
 from __future__ import annotations

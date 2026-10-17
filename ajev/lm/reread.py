@@ -1,14 +1,14 @@
-"""换一种选项顺序再读一次，两次结果在对数空间取平均（docs/plan_lm6.md 第 10.3 节，第 0⁗ 步）。
+"""Reread: ask a question a second time with the options in reverse order and average the two readings in log space.
 
-给初学者的说明：
-- **为什么有用**：模型对选项的位置有偏好（比如偏爱第一个或最后一个）。把选项倒过来再问一次，两次的位置偏好
-  方向相反，取平均后能抵消一部分；对拿不准的题效果最明显。decider-31b 对最高概率低于 0.7 的题（约 28%）这样做，
-  anyjev-l0 对所有题用两种轮换顺序。
-- **对数空间取平均**：两次概率 p1、p2 先取对数、相加除以 2，再归一化（几何平均），比直接平均概率更不容易被
-  某一次的极端值带偏。
-- **打分题（score）不倒序**：等级是有顺序的（低 → 高），倒过来会改变题意。
+- **Why**: models have position preferences (e.g. favouring the first or the last option). The reversed reading has
+  the opposite position bias, so averaging cancels part of it; it matters most on uncertain questions.
+- **Log-space average**: log p1 and log p2 are averaged and renormalised (a geometric mean), which is less sensitive
+  to one extreme reading than averaging the probabilities.
+- **Score questions are never reversed**: their levels are ordered (low to high), and reversing would change the
+  question.
 
-模式：``off``（只读一次，默认）、``unsure``（最高概率低于门槛的题再读一次）、``all``（每道题都读两次）。
+Modes: ``off`` (read once, the default), ``unsure`` (read again when the top probability is below the threshold),
+``all`` (read every question twice).
 """
 
 from __future__ import annotations
@@ -35,14 +35,14 @@ def needs_reread(mode: str, d: Decision, probs: list[float], threshold: float = 
 
 
 def reversed_decision(d: Decision) -> Decision:
-    """选项和 target 都倒序的副本（id 加后缀，避免和原题混在一起）。"""
+    """A copy with options and target reversed (the id gets a suffix so it is never mixed up with the original)."""
     return Decision(id=d.id + "#rev", source=d.source, type=d.type, state=d.state, instructions=d.instructions,
                     options=list(reversed(d.options)), target=list(reversed(d.target)), lang=d.lang, group=d.group,
                     meta=d.meta)
 
 
 def combine(p1: list[float], p2_reversed: list[float]) -> list[float]:
-    """第一次的概率和倒序那次的概率（按倒序后的选项顺序）合并：对数平均，再归一化。"""
+    """Combine the first reading with the reversed one (given in reversed option order): log-space mean, renormalised."""
     p2 = list(reversed(p2_reversed))
     logs = [(math.log(max(a, 1e-12)) + math.log(max(b, 1e-12))) / 2 for a, b in zip(p1, p2)]
     m = max(logs)

@@ -268,8 +268,9 @@ class LMPredictor:
         The prefix is the longest common prefix of the full prompt token ids (not of the state alone, which
         can tokenize differently at the boundary). Tails are right-padded and run on copies of the cache.
         """
-        # 按（材料, 版式）分组：提示词 v2 / v3 下，不超过 26 个选项的单选题以系统消息开头，其余题仍是 v1 版式，
-        # 两种版式的共同前缀只有几个 token；混在一组会让整组都用不上前缀缓存。
+        # group by (state, layout): with prompt v2 / v3, choice questions with at most 26 options start with a system message
+        # while the others keep the v1 layout; the two share only a few prefix tokens, so mixing them in one group would
+        # defeat the prefix cache for the whole group.
         groups: dict[tuple[str, bool], list[tuple[int, list[int]]]] = {}
         for item in todo:
             d = decisions[item[0]]
